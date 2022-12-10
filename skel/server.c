@@ -1,8 +1,9 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -16,28 +17,29 @@
 #include "ipc.h"
 #include "server.h"
 
+#define TIMEOUT 60
+
 #ifndef OUTPUTFILE_TEMPLATE
 #define OUTPUTFILE_TEMPLATE "../checker/output/out-XXXXXX"
 #endif
 
-_Atomic(int) children = 0;
-
-void sigchld_handler(int signum) {
+static void sigchld_handler(int signum) {
 	signum = signum;
 
 	int status;
 	wait(&status);
-	
-	--children;
 }
 
-static int lib_prehooks(struct lib *lib)
-{
-	lib = lib;
-	return 0;
-}
+// This is our attempt to have a controlled exit from the server when
+// receiving SIGINT, leaving the children as orphan processes until they
+// finish their current query. Unfortunately some tests fail with this
+// handler enabled to we decided to leave it off.
+// static void sigint_handler(int signum) {
+// 	signum = signum;
+// 	exit(0);
+// }
 
-void print_error(const char *name, const char *func, const char *params) {
+static void print_error(const char *name, const char *func, const char *params) {
 	printf("Error: %s ", name);
 	if (strlen(func)) {
 		printf("%s ", func);
@@ -51,18 +53,32 @@ void print_error(const char *name, const char *func, const char *params) {
 	fflush(stdout);
 }
 
-static int lib_load(struct lib *lib)
+static int lib_prehooks(struct lib *lib)
 {
-	int ret = dup2(open(lib->outputfile, O_WRONLY, NULL), STDOUT_FILENO);
-	DIE(ret == -1, "dup2");
+	lib = lib;
+	return 0;
+}
 
-	lib->handle = dlopen(lib->libname, RTLD_LAZY);
-	if (lib->handle == 0) {
+static int lib_load(struct lib *lib) {
+	// Open this library's output file
+	int output_fd = open(lib->outputfile, O_WRONLY, NULL);
+	if (output_fd == -1) {
 		print_error(lib->libname, lib->funcname, lib->filename);
 		return -1;
 	}
 
-	DIE(lib->handle == NULL, "dlopen");
+	// Redirect stdout to the output file
+	int ret = dup2(output_fd, STDOUT_FILENO);
+	if (ret == -1) {
+		print_error(lib->libname, lib->funcname, lib->filename);
+		return -1;
+	}
+	
+	lib->handle = dlopen(lib->libname, RTLD_LAZY);
+	if (lib->handle == NULL) {
+		print_error(lib->libname, lib->funcname, lib->filename);
+		return -1;
+	}
 
 	if (strlen(lib->filename) == 0) {
 		lib->run = (lambda_func_t)dlsym(lib->handle, strlen(lib->funcname) == 0 ? "run" : lib->funcname);
@@ -85,23 +101,30 @@ static int lib_load(struct lib *lib)
 static int lib_execute(struct lib *lib)
 {
 	pid_t pid = fork();
+
 	switch(pid) {
-		case 0: {
-			lib->run ? lib->run() : lib->p_run(lib->filename);
-			break;
+	case 0:
+		// Run the function in the child process to avoid killing the parent
+		// in case anything goes wrong.
+		lib->run ? lib->run() : lib->p_run(lib->filename);
+		break;
+	case -1:
+		print_error(lib->libname, lib->funcname, lib->filename);
+		break;
+	default: {
+		int status;
+		
+		// Kill the child after a timeout
+		sleep(TIMEOUT);
+		if (kill(pid, SIGINT) == 0) {
+			print_error(lib->libname, lib->funcname, lib->filename);
 		}
-		case -1:
-			DIE(1, "fork");
-			break;
-		default: {
-			int status;
-			wait(&status);
-			if (status != 0) {
-				puts("a crapat copilu");
-			}
-			break;
-		}
+
+		wait(&status);
+		break;
 	}
+	}
+
 	fflush(stdout);
 	return 0;
 }
@@ -156,35 +179,35 @@ static int parse_command(const char *buf, char *name, char *func, char *params)
 static void handle_client(int client_fd) {
 	char buf[BUFSIZE] = {};
 
-	struct lib lib;
+	while (recv_socket(client_fd, buf, sizeof(buf)) > 0) {
+		if (strncmp(buf, "exit", 4) == 0) {
+			break;
+		}
 
-	int ret = recv_socket(client_fd, buf, sizeof(buf));
-	DIE(ret == -1, "recv_socket");
+		char name[BUFSIZE] = {},
+			 func[BUFSIZE] = {},
+			 params[BUFSIZE] = {},
+			 output_filename[BUFSIZE] = {};
 
-	char name[BUFSIZE] = {},
-			func[BUFSIZE] = {},
-			params[BUFSIZE] = {},
-			output_filename[BUFSIZE] = {};
+		parse_command(buf, name, func, params);
 
-	ret = parse_command(buf, name, func, params);
-	DIE(ret <= 0, "parse_command");
+		struct lib lib;
+		memset(&lib, 0, sizeof(lib));
 
-	memset(&lib, 0, sizeof(lib));
+		strcpy(output_filename, OUTPUTFILE_TEMPLATE);
 
-	strcpy(output_filename, OUTPUTFILE_TEMPLATE);
+		int output_fd = mkstemp(output_filename);
+		close(output_fd);
 
-	int output_fd = mkstemp(output_filename);
-	close(output_fd);
+		lib.outputfile = strdup(output_filename);
+		lib.libname = strdup(name);
+		lib.funcname = strdup(func);
+		lib.filename = strdup(params);
 
-	lib.outputfile = strdup(output_filename);
-	lib.libname = strdup(name);
-	lib.funcname = strdup(func);
-	lib.filename = strdup(params);
+		lib_run(&lib);
 
-	lib_run(&lib);
-
-	ret = send_socket(client_fd, output_filename, strlen(output_filename));
-	DIE(ret == -1, "send_socket");
+		send_socket(client_fd, output_filename, strlen(output_filename));
+	}
 
 	close_socket(client_fd);
 }
@@ -192,6 +215,8 @@ static void handle_client(int client_fd) {
 int main(void)
 {
 	signal(SIGCHLD, sigchld_handler);
+	// signal(SIGINT, sigint_handler);
+
 	int ret;
 
 	/* TODO - Implement server connection */
@@ -214,10 +239,9 @@ int main(void)
 
 	while(1) {
 		int client_fd = accept(fd, (struct sockaddr *)&sockaddr, &(socklen_t){sizeof(sockaddr)});
-		DIE(client_fd == -1, "accept");
 
 		pid_t pid = fork();
-
+		
 		switch(pid) {
 			case 0: {
 				handle_client(client_fd);
@@ -227,16 +251,12 @@ int main(void)
 				DIE(1, "fork");
 				break;
 			default: {
-				++children;
 				break;
 			}
 		}
 	}
 
-	while (children);
-
 	close_socket(fd);
-	DIE(ret == -1, "close");
 
 	return 0;
 }
