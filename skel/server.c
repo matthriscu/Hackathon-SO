@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/ip.h>
+#include <sys/wait.h>
 
 #include "utils.h"
 #include "ipc.h"
@@ -52,7 +53,8 @@ static int lib_load(struct lib *lib)
 	DIE(lib->handle == NULL, "dlopen");
 
 	if (strlen(lib->filename) == 0) {
-		lib->run = (lambda_func_t)dlsym(lib->handle, "run");
+		lib->run = (lambda_func_t)dlsym(lib->handle, strlen(lib->funcname) == 0 ? "run" : lib->funcname);
+
 		if (lib->run == 0) {
 			print_error(lib->libname, lib->funcname, lib->filename);
 			return -1;
@@ -122,10 +124,45 @@ static int parse_command(const char *buf, char *name, char *func, char *params)
 	return sscanf(buf, "%s %s %s", name, func, params);
 }
 
+static void handle_client(int client_fd) {
+	char buf[BUFSIZE] = {};
+
+	struct lib lib;
+
+	int ret = recv_socket(client_fd, buf, sizeof(buf));
+	DIE(ret == -1, "recv_socket");
+
+	char name[BUFSIZE] = {},
+			func[BUFSIZE] = {},
+			params[BUFSIZE] = {},
+			output_filename[BUFSIZE] = {};
+
+	ret = parse_command(buf, name, func, params);
+	DIE(ret <= 0, "parse_command");
+
+	memset(&lib, 0, sizeof(lib));
+
+	strcpy(output_filename, OUTPUTFILE_TEMPLATE);
+
+	int output_fd = mkstemp(output_filename);
+	close(output_fd);
+
+	lib.outputfile = strdup(output_filename);
+	lib.libname = strdup(name);
+	lib.funcname = strdup(func);
+	lib.filename = strdup(params);
+
+	lib_run(&lib);
+
+	ret = send_socket(client_fd, output_filename, strlen(output_filename));
+	DIE(ret == -1, "send_socket");
+
+	close_socket(client_fd);
+}
+
 int main(void)
 {
 	int ret;
-	struct lib lib;
 
 	/* TODO - Implement server connection */
 	int fd = create_socket(AF_UNIX, SOCK_STREAM, 0);
@@ -145,43 +182,25 @@ int main(void)
 	ret = listen(fd, 10);
 	DIE(ret == -1, "listen");
 
-	char buf[BUFSIZE];
 
 	while (1) {
 		int client_fd = accept(fd, (struct sockaddr *)&sockaddr, &(socklen_t){sizeof(sockaddr)});
 		DIE(client_fd == -1, "accept");
 
-		memset(buf, 0, sizeof(buf));
+		pid_t pid = fork();
 
-		ret = recv_socket(client_fd, buf, sizeof(buf));
-		DIE(ret == -1, "recv_socket");
-
-		char name[BUFSIZE] = {},
-			 func[BUFSIZE] = {},
-			 params[BUFSIZE] = {},
-			 output_filename[BUFSIZE] = {};
-
-		ret = parse_command(buf, name, func, params);
-		DIE(ret <= 0, "parse_command");
-
-		memset(&lib, 0, sizeof(lib));
-
-		strcpy(output_filename, OUTPUTFILE_TEMPLATE);
-
-		int output_fd = mkstemp(output_filename);
-		close(output_fd);
-
-		lib.outputfile = strdup(output_filename);
-		lib.libname = strdup(name);
-		lib.funcname = strdup(func);
-		lib.filename = strdup(params);
-
-		lib_run(&lib);
-
-		ret = send_socket(client_fd, output_filename, strlen(output_filename));
-		DIE(ret == -1, "send_socket");
-
-		close_socket(client_fd);
+		switch(pid) {
+			case 0: {
+				handle_client(client_fd);
+				break;
+			}
+			case -1:
+				DIE(1, "fork");
+				break;
+			default: {
+				break;
+			}
+		}		
 	}
 
 	close_socket(fd);

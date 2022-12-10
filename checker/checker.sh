@@ -36,7 +36,8 @@ COLOR_GREEN="\x1b[1;32m"
 COLOR_RESET="\x1b[0m"
 
 # Export LD_LIBRARY_PATH to inform the dynamic loader where it should look for the libraries
-export LD_LIBRARY_PATH="${SOLUTION_DIR}:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${SOLUTION_DIR}:${CHECKER_DIR}:${LD_LIBRARY_PATH:-}"
+echo $LD_LIBRARY_PATH
 
 # Cleanup if required
 trap 'rm -f "${MAKE_OUTPUT}"; kill_server' EXIT ERR TERM INT
@@ -110,7 +111,6 @@ start_server() {
     mkdir -p "${SERVER_OUT_DIR}"
     nohup "${SERVER_BIN}" >& "${SERVER_OUTPUT}" &
     SERVER_PID=$!
-    # echo "Starting server"
 }
 
 kill_server() {
@@ -342,7 +342,7 @@ big_test() {
         if [ $((CLIENT_NUM%4)) -eq 0 ]; then
             timeout 1s "${CLIENT_BIN}" "libspecial.so" 1> "${CLIENT_OUTPUT}" 2> "${CLIENT_OUTPUT_ERR}" &
         elif [ $((CLIENT_NUM%4)) -eq 1 ]; then
-            timeout 1s "${CLIENT_BIN}" "libbasic.so" "cat" "${BIG_DIR}/test_${CLIENT_NUM}" 1> "${CLIENT_OUTPUT}" 2> "${CLIENT_OUTPUT_ERR}" &
+            timeout 1s "${CLIENT_BIN}" ${CHECKER_DIR}/"libbasic.so" "cat" "${BIG_DIR}/test_${CLIENT_NUM}" 1> "${CLIENT_OUTPUT}" 2> "${CLIENT_OUTPUT_ERR}" &
         elif [ $((CLIENT_NUM%4)) -eq 2 ]; then
             timeout 1s "${CLIENT_BIN}" "libspecial.so" "reset" 1> "${CLIENT_OUTPUT}" 2> "${CLIENT_OUTPUT_ERR}" &
         else
