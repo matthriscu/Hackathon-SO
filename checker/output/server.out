@@ -1,0 +1,1 @@
+/home/student/hackathon-so/skel/server: error while loading shared libraries: ./libipc.so: cannot open shared object file: No such file or directory
