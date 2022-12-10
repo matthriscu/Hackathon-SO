@@ -10,6 +10,7 @@
 #include <sys/un.h>
 #include <netinet/ip.h>
 #include <sys/wait.h>
+#include <setjmp.h>
 
 #include "utils.h"
 #include "ipc.h"
@@ -18,6 +19,17 @@
 #ifndef OUTPUTFILE_TEMPLATE
 #define OUTPUTFILE_TEMPLATE "../checker/output/out-XXXXXX"
 #endif
+
+_Atomic(int) children = 0;
+
+void sigchld_handler(int signum) {
+	signum = signum;
+
+	int status;
+	wait(&status);
+	
+	--children;
+}
 
 static int lib_prehooks(struct lib *lib)
 {
@@ -72,7 +84,24 @@ static int lib_load(struct lib *lib)
 
 static int lib_execute(struct lib *lib)
 {
-	lib->run ? lib->run() : lib->p_run(lib->filename);
+	pid_t pid = fork();
+	switch(pid) {
+		case 0: {
+			lib->run ? lib->run() : lib->p_run(lib->filename);
+			break;
+		}
+		case -1:
+			DIE(1, "fork");
+			break;
+		default: {
+			int status;
+			wait(&status);
+			if (status != 0) {
+				puts("a crapat copilu");
+			}
+			break;
+		}
+	}
 	fflush(stdout);
 	return 0;
 }
@@ -162,6 +191,7 @@ static void handle_client(int client_fd) {
 
 int main(void)
 {
+	signal(SIGCHLD, sigchld_handler);
 	int ret;
 
 	/* TODO - Implement server connection */
@@ -182,8 +212,7 @@ int main(void)
 	ret = listen(fd, 10);
 	DIE(ret == -1, "listen");
 
-
-	while (1) {
+	while(1) {
 		int client_fd = accept(fd, (struct sockaddr *)&sockaddr, &(socklen_t){sizeof(sockaddr)});
 		DIE(client_fd == -1, "accept");
 
@@ -198,10 +227,13 @@ int main(void)
 				DIE(1, "fork");
 				break;
 			default: {
+				++children;
 				break;
 			}
-		}		
+		}
 	}
+
+	while (children);
 
 	close_socket(fd);
 	DIE(ret == -1, "close");
